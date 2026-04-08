@@ -17,7 +17,9 @@ export const UserActivity = ({ id }: UserActivityProps) => {
     { key: 'comment', title: '评论', href: `/user/${id}/comment` },
     { key: 'rating', title: '评价', href: `/user/${id}/rating` },
     { key: 'favorite', title: '收藏夹', href: `/user/${id}/favorite` },
-    { key: 'resource', title: '发布补丁', href: `/user/${id}/resource` }
+    { key: 'resource', title: '发布补丁', href: `/user/${id}/resource` },
+    { key: 'purchase', title: '已购资源', href: `/user/${id}/purchase` },
+    { key: 'download', title: '下载记录', href: `/user/${id}/download` }
   ]
 
   const selectedKey = tabs.some((tab) => tab.key === lastSegment)

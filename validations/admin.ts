@@ -99,6 +99,10 @@ export const adminReportPaginationSchema = adminPaginationSchema.extend({
   targetType: adminReportTargetTypeSchema.default('comment')
 })
 
+export const adminTradePaginationSchema = adminPaginationSchema.extend({
+  tab: z.enum(['purchase', 'download']).default('purchase')
+})
+
 export const adminUpdateUserSchema = z.object({
   uid: z.coerce.number().min(1).max(9999999),
   name: z

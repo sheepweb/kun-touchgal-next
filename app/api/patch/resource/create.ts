@@ -3,6 +3,7 @@ import { prisma } from '~/prisma/index'
 import { patchResourceCreateSchema } from '~/validations/patch'
 import { createMessage } from '~/app/api/utils/message'
 import { recalcPatchType, uploadPatchResource } from './_helper'
+import { syncPatchResourceSale } from './trade'
 import type { PatchResource } from '~/types/api/patch'
 
 export const createPatchResource = async (
@@ -10,7 +11,19 @@ export const createPatchResource = async (
   uid: number,
   userRole: number
 ) => {
-  const { patchId, type, language, platform, links, ...resourceData } = input
+  const {
+    patchId,
+    type,
+    language,
+    platform,
+    links,
+    enableSale,
+    saleCurrencyCode,
+    salePrice,
+    saleAccessExpireMode,
+    saleAccessDurationDays,
+    ...resourceData
+  } = input
 
   const currentPatch = await prisma.patch.findUnique({
     where: { id: patchId },
@@ -85,6 +98,16 @@ export const createPatchResource = async (
       }
     })
 
+    const sale = await syncPatchResourceSale(prisma, {
+      resourceId: newResource.id,
+      sellerId: uid,
+      enableSale,
+      saleCurrencyCode,
+      salePrice,
+      saleAccessExpireMode,
+      saleAccessDurationDays
+    })
+
     await prisma.user.update({
       where: { id: uid },
       data: { moemoepoint: { increment: 3 } }
@@ -124,6 +147,15 @@ export const createPatchResource = async (
       userId: newResource.user_id,
       patchId: newResource.patch_id,
       created: String(newResource.created),
+      sale,
+      isPaid: !!sale,
+      hasPurchased: false,
+      requiresLogin: false,
+      canDownload: true,
+      accessStatus: 'owner',
+      accessStartedAt: null,
+      accessExpiresAt: null,
+      accessDurationDays: sale?.accessDurationDays ?? null,
       user: {
         id: newResource.user.id,
         name: newResource.user.name,

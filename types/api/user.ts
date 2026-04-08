@@ -1,3 +1,11 @@
+import type { PatchResourceAccessStatus } from './patch'
+
+export type UserPurchaseAccessStatusFilter =
+  | 'all'
+  | 'owned'
+  | 'expired'
+  | 'not_started'
+
 export interface UserInfo {
   id: number
   requestUserUid: number
@@ -42,6 +50,43 @@ export interface UserResource {
   language: string[]
   platform: string[]
   created: string
+}
+
+export interface UserPurchasedResource {
+  purchaseId: number
+  resourceId: number
+  resourceName: string
+  patchId: number
+  patchUniqueId: string
+  patchName: string
+  patchBanner: string
+  storage: string
+  price: number
+  currencyCode: string
+  accessExpireMode: string
+  accessDurationDays: number | null
+  downloadedAt: string | null
+  downloadCount: number
+  accessStartedAt: string | null
+  accessExpiresAt: string | null
+  accessStatus: PatchResourceAccessStatus
+  canDownload: boolean
+  purchasedAt: string
+}
+
+export interface UserResourceDownloadLog {
+  id: number
+  resourceId: number
+  resourceName: string
+  patchId: number
+  patchUniqueId: string
+  patchName: string
+  patchBanner: string
+  storage: string
+  accessStatus: PatchResourceAccessStatus
+  accessStartedAt: string | null
+  accessExpiresAt: string | null
+  downloadedAt: string
 }
 
 export interface UserContribute {

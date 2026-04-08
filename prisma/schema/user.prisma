@@ -34,6 +34,14 @@ model user {
   patch_company     patch_company[]
   patch_rating      patch_rating[]
   patch_rating_like patch_rating_like[]
+  currency_balance  user_currency_balance[]   @relation("user_currency_balance")
+  currency_ledger   currency_ledger[]         @relation("user_currency_ledger")
+  currency_ledger_counterparty currency_ledger[] @relation("currency_ledger_counterparty")
+  patch_resource_sale patch_resource_sale[]   @relation("patch_resource_sale_seller")
+  patch_resource_purchase_buy patch_resource_purchase[] @relation("patch_resource_purchase_buyer")
+  patch_resource_purchase_sell patch_resource_purchase[] @relation("patch_resource_purchase_seller")
+  patch_resource_download_log_buy patch_resource_download_log[] @relation("patch_resource_download_log_buyer")
+  patch_resource_download_log_sell patch_resource_download_log[] @relation("patch_resource_download_log_seller")
 
   following       user_follow_relation[] @relation("user_following")
   follower        user_follow_relation[] @relation("user_follower")

@@ -1,0 +1,132 @@
+model currency_definition {
+  id           Int      @id @default(autoincrement())
+  code         String   @unique @db.VarChar(31)
+  name         String   @db.VarChar(107)
+  symbol       String   @default("") @db.VarChar(31)
+  description  String   @default("") @db.VarChar(1007)
+  enabled      Boolean  @default(true)
+  allow_trade  Boolean  @default(true)
+  allow_reward Boolean  @default(false)
+  sort_order   Int      @default(0)
+
+  balance        user_currency_balance[]
+  ledger         currency_ledger[]
+  patch_sale     patch_resource_sale[]
+  patch_purchase patch_resource_purchase[]
+
+  created DateTime @default(now())
+  updated DateTime @updatedAt
+}
+
+model user_currency_balance {
+  id            Int                 @id @default(autoincrement())
+  user_id       Int
+  user          user                @relation("user_currency_balance", fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  currency_code String              @db.VarChar(31)
+  currency      currency_definition @relation(fields: [currency_code], references: [code], onDelete: Cascade, onUpdate: NoAction)
+  balance       Int                 @default(0)
+  total_earned  Int                 @default(0)
+  total_spent   Int                 @default(0)
+
+  created DateTime @default(now())
+  updated DateTime @updatedAt
+
+  @@unique([user_id, currency_code])
+  @@index([user_id])
+  @@index([currency_code])
+}
+
+model currency_ledger {
+  id                   Int                 @id @default(autoincrement())
+  user_id              Int
+  user                 user                @relation("user_currency_ledger", fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  currency_code        String              @db.VarChar(31)
+  currency             currency_definition @relation(fields: [currency_code], references: [code], onDelete: Cascade, onUpdate: NoAction)
+  direction            String              @db.VarChar(31)
+  amount               Int
+  balance_after        Int
+  biz_type             String              @db.VarChar(63)
+  biz_id               String              @default("") @db.VarChar(107)
+  counterparty_user_id Int?
+  counterparty_user    user?               @relation("currency_ledger_counterparty", fields: [counterparty_user_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  remark               String              @default("") @db.VarChar(1007)
+
+  created DateTime @default(now())
+  updated DateTime @updatedAt
+
+  @@index([user_id, currency_code])
+  @@index([biz_type, biz_id])
+  @@index([counterparty_user_id])
+}
+
+model patch_resource_sale {
+  id                   Int                 @id @default(autoincrement())
+  resource_id          Int                 @unique
+  resource             patch_resource      @relation("patch_resource_sale", fields: [resource_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  seller_id            Int
+  seller               user                @relation("patch_resource_sale_seller", fields: [seller_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  currency_code        String              @db.VarChar(31)
+  currency             currency_definition @relation(fields: [currency_code], references: [code], onDelete: NoAction, onUpdate: NoAction)
+  price                Int
+  enabled              Boolean             @default(false)
+  access_expire_mode   String              @default("never") @db.VarChar(31)
+  access_duration_days Int?
+
+  created DateTime @default(now())
+  updated DateTime @updatedAt
+
+  @@index([seller_id])
+  @@index([currency_code])
+  @@index([enabled])
+}
+
+model patch_resource_purchase {
+  id                   Int                 @id @default(autoincrement())
+  resource_id          Int
+  resource             patch_resource      @relation("patch_resource_purchase", fields: [resource_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  buyer_id             Int
+  buyer                user                @relation("patch_resource_purchase_buyer", fields: [buyer_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  seller_id            Int
+  seller               user                @relation("patch_resource_purchase_seller", fields: [seller_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  currency_code        String              @db.VarChar(31)
+  currency             currency_definition @relation(fields: [currency_code], references: [code], onDelete: NoAction, onUpdate: NoAction)
+  price                Int
+  status               String              @default("paid") @db.VarChar(31)
+  access_expire_mode   String              @default("never") @db.VarChar(31)
+  access_duration_days Int?
+  access_started_at    DateTime?
+  access_expires_at    DateTime?
+  first_download_at    DateTime?
+  last_download_at     DateTime?
+
+  created DateTime @default(now())
+  updated DateTime @updatedAt
+
+  @@unique([resource_id, buyer_id])
+  @@index([buyer_id])
+  @@index([seller_id])
+  @@index([currency_code])
+  @@index([status])
+  @@index([buyer_id, access_expires_at])
+}
+
+model patch_resource_download_log {
+  id                Int            @id @default(autoincrement())
+  resource_id       Int
+  resource          patch_resource @relation("patch_resource_download_log", fields: [resource_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  buyer_id          Int
+  buyer             user           @relation("patch_resource_download_log_buyer", fields: [buyer_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  seller_id         Int
+  seller            user           @relation("patch_resource_download_log_seller", fields: [seller_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  storage           String         @db.VarChar(107)
+  access_status     String         @db.VarChar(31)
+  access_started_at DateTime?
+  access_expires_at DateTime?
+
+  created DateTime @default(now())
+  updated DateTime @updatedAt
+
+  @@index([buyer_id, created])
+  @@index([seller_id, created])
+  @@index([resource_id, created])
+}

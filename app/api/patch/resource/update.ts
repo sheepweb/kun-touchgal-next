@@ -6,6 +6,7 @@ import {
   uploadPatchResource,
   recalcPatchType
 } from './_helper'
+import { syncPatchResourceSale } from './trade'
 import type { PatchResource } from '~/types/api/patch'
 
 export const updatePatchResource = async (
@@ -13,7 +14,17 @@ export const updatePatchResource = async (
   uid: number,
   userRole: number
 ) => {
-  const { resourceId, patchId, links, ...resourceData } = input
+  const {
+    resourceId,
+    patchId,
+    links,
+    enableSale,
+    saleCurrencyCode,
+    salePrice,
+    saleAccessExpireMode,
+    saleAccessDurationDays,
+    ...resourceData
+  } = input
   const resource = await prisma.patch_resource.findUnique({
     where: { id: resourceId },
     include: {
@@ -151,6 +162,16 @@ export const updatePatchResource = async (
       }
     })
 
+    const sale = await syncPatchResourceSale(prisma, {
+      resourceId: newResource.id,
+      sellerId: newResource.user_id,
+      enableSale,
+      saleCurrencyCode,
+      salePrice,
+      saleAccessExpireMode,
+      saleAccessDurationDays
+    })
+
     await prisma.patch.update({
       where: { id: patchId },
       data: { resource_update_time: new Date() }
@@ -183,6 +204,15 @@ export const updatePatchResource = async (
       userId: newResource.user_id,
       patchId: newResource.patch_id,
       created: String(newResource.created),
+      sale,
+      isPaid: !!sale,
+      hasPurchased: false,
+      requiresLogin: false,
+      canDownload: true,
+      accessStatus: 'owner',
+      accessStartedAt: null,
+      accessExpiresAt: null,
+      accessDurationDays: sale?.accessDurationDays ?? null,
       user: {
         id: newResource.user.id,
         name: newResource.user.name,

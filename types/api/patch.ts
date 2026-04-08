@@ -84,6 +84,53 @@ export interface PatchResourceLink {
   download: number
 }
 
+export type PatchResourceAccessExpireMode =
+  | 'never'
+  | 'purchase'
+  | 'first_download'
+
+export type PatchResourceAccessStatus =
+  | 'guest'
+  | 'free'
+  | 'owner'
+  | 'owned'
+  | 'not_purchased'
+  | 'expired'
+  | 'not_started'
+
+export interface PatchResourceSaleInfo {
+  currencyCode: string
+  price: number
+  accessExpireMode: PatchResourceAccessExpireMode
+  accessDurationDays: number | null
+}
+
+export interface PatchResourcePurchaseResult {
+  resourceId: number
+  purchaseAction: 'purchased' | 'renewed'
+  hasPurchased: boolean
+  canDownload: boolean
+  accessStatus: PatchResourceAccessStatus
+  accessStartedAt: string | null
+  accessExpiresAt: string | null
+  accessDurationDays: number | null
+  sale: PatchResourceSaleInfo | null
+}
+
+export interface PatchResourceDownloadPayload {
+  resourceId: number
+  patchId: number
+  storage: string
+  content: string
+  code: string
+  password: string
+  hash: string
+  accessStatus: PatchResourceAccessStatus
+  accessStartedAt: string | null
+  accessExpiresAt: string | null
+  accessDurationDays: number | null
+}
+
 export interface PatchResource {
   id: number
   name: string
@@ -100,6 +147,15 @@ export interface PatchResource {
   userId: number
   patchId: number
   created: string
+  sale: PatchResourceSaleInfo | null
+  isPaid: boolean
+  hasPurchased: boolean
+  requiresLogin: boolean
+  canDownload: boolean
+  accessStatus: PatchResourceAccessStatus
+  accessStartedAt: string | null
+  accessExpiresAt: string | null
+  accessDurationDays: number | null
   user: KunUser & {
     patchCount: number
     role: number

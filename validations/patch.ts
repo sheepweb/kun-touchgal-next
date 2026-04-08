@@ -9,6 +9,11 @@ import {
   SUPPORTED_RESOURCE_SECTION
 } from '~/constants/resource'
 import {
+  DEFAULT_TRADE_CURRENCY_CODE,
+  RESOURCE_ACCESS_EXPIRE_MODE,
+  SUPPORTED_CURRENCY_CODE
+} from '~/constants/currency'
+import {
   KUN_GALGAME_RATING_RECOMMEND_CONST,
   KUN_GALGAME_RATING_SPOILER_CONST,
   KUN_GALGAME_RATING_PLAY_STATUS_CONST
@@ -63,7 +68,7 @@ export const getPatchCommentSchema = z.object({
   commentId: z.coerce.number().min(1).max(9999999).optional()
 })
 
-export const patchResourceCreateSchema = z.object({
+const patchResourceBaseSchema = z.object({
   patchId: z.coerce.number().min(1).max(9999999),
   section: z
     .string()
@@ -142,14 +147,68 @@ export const patchResourceCreateSchema = z.object({
     .refine(
       (types) => types.every((type) => SUPPORTED_PLATFORM.includes(type)),
       { message: '非法的平台' }
-    )
+    ),
+  enableSale: z.boolean().default(false),
+  saleCurrencyCode: z
+    .string()
+    .default(DEFAULT_TRADE_CURRENCY_CODE)
+    .refine((code) => SUPPORTED_CURRENCY_CODE.includes(code as any), {
+      message: '非法的交易币种'
+    }),
+  salePrice: z.coerce.number().int().min(0).default(0),
+  saleAccessExpireMode: z
+    .string()
+    .default('never')
+    .refine((mode) => RESOURCE_ACCESS_EXPIRE_MODE.includes(mode as any), {
+      message: '非法的授权模式'
+    }),
+  saleAccessDurationDays: z.preprocess(
+    (value) => {
+      if (value === '' || value === undefined || value === null) {
+        return null
+      }
+      return value
+    },
+    z.coerce.number().int().min(1).nullable().default(null)
+  )
 })
 
-export const patchResourceUpdateSchema = patchResourceCreateSchema.merge(
-  z.object({
+const validatePatchResourceSale = (
+  data: z.infer<typeof patchResourceBaseSchema>,
+  ctx: z.RefinementCtx
+) => {
+  if (!data.enableSale) {
+    return
+  }
+
+  if (data.salePrice < 1) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['salePrice'],
+      message: '开启售卖后价格必须大于 0'
+    })
+  }
+
+  if (
+    data.saleAccessExpireMode !== 'never' &&
+    !data.saleAccessDurationDays
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['saleAccessDurationDays'],
+      message: '限时授权必须填写有效天数'
+    })
+  }
+}
+
+export const patchResourceCreateSchema =
+  patchResourceBaseSchema.superRefine(validatePatchResourceSale)
+
+export const patchResourceUpdateSchema = patchResourceBaseSchema
+  .extend({
     resourceId: z.coerce.number().min(1).max(9999999)
   })
-)
+  .superRefine(validatePatchResourceSale)
 
 export const declinePullRequestSchema = z.object({
   prId: z.coerce.number({ message: 'ID 必须为数字' }).min(1).max(9999999),
@@ -176,6 +235,16 @@ export const updatePatchResourceStatsSchema = z.object({
   patchId: z.coerce.number({ message: 'ID 必须为数字' }).min(1).max(9999999),
   resourceId: z.coerce.number({ message: 'ID 必须为数字' }).min(1).max(9999999),
   linkId: z.coerce.number({ message: 'ID 必须为数字' }).min(1).max(9999999)
+})
+
+export const accessPatchResourceDownloadSchema = z.object({
+  patchId: z.coerce.number({ message: 'ID 必须为数字' }).min(1).max(9999999),
+  resourceId: z.coerce.number({ message: 'ID 必须为数字' }).min(1).max(9999999),
+  linkId: z.coerce.number({ message: 'ID 必须为数字' }).min(1).max(9999999).optional()
+})
+
+export const purchasePatchResourceSchema = z.object({
+  resourceId: z.coerce.number({ message: '资源 ID 必须为数字' }).min(1).max(9999999)
 })
 
 export const createPatchFeedbackSchema = z.object({

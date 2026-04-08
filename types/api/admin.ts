@@ -1,6 +1,7 @@
 import type { PatchResource } from '~/types/api/patch'
 import type { PatchComment } from '~/types/api/comment'
 import type { Message } from '~/types/api/message'
+import type { PatchResourceAccessStatus } from '~/types/api/patch'
 
 export type AdminStatsName =
   | 'user'
@@ -84,6 +85,44 @@ export interface AdminLog {
   user: KunUser
   content: string
   created: Date | string
+}
+
+export interface AdminTradePurchase {
+  id: number
+  resourceId: number
+  resourceName: string
+  patchId: number
+  patchUniqueId: string
+  patchName: string
+  storage: string
+  price: number
+  currencyCode: string
+  accessExpireMode: string
+  accessDurationDays: number | null
+  accessStatus: PatchResourceAccessStatus
+  accessStartedAt: string | null
+  accessExpiresAt: string | null
+  firstDownloadAt: string | null
+  lastDownloadAt: string | null
+  purchasedAt: string
+  buyer: KunUser
+  seller: KunUser
+}
+
+export interface AdminTradeDownloadLog {
+  id: number
+  resourceId: number
+  resourceName: string
+  patchId: number
+  patchUniqueId: string
+  patchName: string
+  storage: string
+  accessStatus: PatchResourceAccessStatus
+  accessStartedAt: string | null
+  accessExpiresAt: string | null
+  downloadedAt: string
+  buyer: KunUser
+  seller: KunUser
 }
 
 export interface AdminRedirectConfig {

@@ -1,0 +1,1488 @@
+---
+title: 多货币资源交易系统实现进展
+banner: 'https://cloud.touchgaloss.com/uploads/20251201143220112.avif'
+description: '本文已同步为 TouchGal 多货币资源交易系统的实现进展文档，覆盖已完成的后端闭环、当前前端接线状态与剩余收口项。'
+date: 2026-03-11
+authorUid: 1
+authorName: 'Palentum'
+authorAvatar: 'https://cloud.touchgaloss.com/user/avatar/user_1/avatar-mini.avif'
+authorHomepage: 'https://www.arnebiae.com'
+pin: false
+---
+
+## 背景
+
+当前站点已经存在 `moemoepoint`，其职责是社区激励与行为门槛，而不是交易货币。若直接复用它承接资源买卖，会与现有签到、私聊、改名、发布奖励等语义冲突，也不利于后续跟进上游更新。
+
+本计划的目标，是在**不替换旧积分**的前提下，新增一套**独立、低侵入、可扩展**的站内货币系统，优先支持“用户发布付费资源，其他用户购买后解锁下载”的闭环。
+
+## 当前实现状态
+
+截至 `2026-03-11`，本文已从单纯的“开发计划”同步为“已实现状态 + 历史方案存档”的进度文档。
+
+### 已完成
+
+- Prisma 多文件 schema 已补齐货币、余额、账本、资源售卖与购买记录模型。
+- `constants/currency.ts`、`types/api/patch.ts`、`types/api/user.ts`、`validations/patch.ts` 已同步到交易与授权语义。
+- `app/api/patch/resource/get.ts` 已输出 `sale`、`isPaid`、`hasPurchased`、`canDownload`、`accessStatus` 等字段，并对公开接口中的真实下载字段做脱敏。
+- `app/api/patch/resource/purchase.ts` 与 `app/api/patch/resource/purchase/route.ts` 已完成资源购买事务。
+- 过期资源已支持续费 / 重新购买，续费策略采用“更新原购买记录”而不是重复创建购买记录。
+- `app/api/patch/resource/download/route.ts` 已完成作者/管理员/已购用户下载授权校验，并支持 `first_download` 首次下载起算。
+- `app/api/user/profile/purchase/route.ts` 已完成“已购资源”分页接口，且仅允许用户查看自己的已购资源。
+- `app/api/user/profile/download/route.ts`、`app/user/[id]/download/page.tsx` 已完成下载记录接口与页面接线。
+- `app/admin/trade/page.tsx`、`app/api/admin/trade/route.ts`、`components/admin/trade/Container.tsx` 已完成后台交易管理视图。
+- 前台资源详情、已购资源页与下载记录页的交易/授权文案已经统一，公开详情页继续保持 SEO 可读与下载信息脱敏。
+- 当前交易 / 资源链路相关改动已完成 `pnpm typecheck`，并通过定向 `next lint --file ...` 验证。
+
+### 当前剩余收口
+
+- 当前资源交易一期闭环已经完成，本次剩余收口主要集中在仓库既有的全局 lint 存量问题与文档同步。
+- 现阶段文档中的历史草案仍作为实现存档保留，若与代码存在差异，应以当前仓库实现为准。
+
+### 阅读说明
+
+- 下文保留了原始设计、Prisma 草案与接口说明，作为实现依据存档。
+- 若某些段落仍以“建议 / 草案”措辞呈现，应以本节的“已完成 / 当前剩余收口”为准。
+
+## 总体目标
+
+- 保留 `moemoepoint` 的现有用途与展示逻辑。
+- 新增独立货币系统，不与旧积分字段耦合。
+- 从底层支持多货币，但第一期产品只开放一种主交易货币。
+- 资源交易必须先解决“访问控制”，再处理扣币与成交。
+- 尽量通过新增表、新接口、新常量完成扩展，减少对上游核心文件的侵入。
+
+## 设计原则
+
+### 1. 新增，不替换
+
+- 不改变 `user.moemoepoint` 现有业务含义。
+- 不把交易余额塞进 `user` 主表。
+- 不把大量交易字段直接堆到 `patch_resource` 主体上。
+
+### 2. 多货币底层一次到位
+
+- 不使用 `gold`、`silver`、`ticket` 这种“每种货币一个字段”的模式。
+- 所有余额、账本、订单、售卖记录都必须显式带 `currencyCode`。
+- 历史成交记录必须固化成交币种与成交价格。
+
+### 3. 授权优先于下载
+
+- 未购买用户不能直接拿到 `content`、`code`、`password`。
+- 购买记录既是订单记录，也是下载授权依据。
+- 付费资源的真实链接只能在“作者本人 / 管理员 / 已购买用户”范围内返回。
+- 授权需要支持时效控制，例如首次下载后 3 天失效、首次下载后 30 天失效。
+
+### 4. 第一阶段控制复杂度
+
+- 第一阶段不做汇率、货币互转、用户转账、多币任选支付。
+- 第一阶段优先使用整数 `Int` 表示站内虚拟货币。
+- 第一阶段暂不处理资源被二次传播后的站外扩散风险，优先完成站内授权闭环。
+
+## 数据模型
+
+### `currency_definition`
+
+用于定义币种元信息，建议包含：`code`、`name`、`symbol`、`enabled`、`allowTrade`、`allowReward`、`sortOrder`。
+
+关键约束：`code` 唯一。
+
+### `user_currency_balance`
+
+用于保存用户在各币种下的余额快照，建议包含：`user_id`、`currency_code`、`balance`、`total_earned`、`total_spent`。
+
+关键约束：`@@unique([user_id, currency_code])`。
+
+### `currency_ledger`
+
+用于记录每一笔货币流水，建议包含：`user_id`、`currency_code`、`direction`、`amount`、`balance_after`、`biz_type`、`biz_id`、`counterparty_user_id`、`remark`。
+
+关键要求：账本必须支持按用户、币种、业务单号回溯。
+
+### `patch_resource_sale`
+
+用于给资源挂售卖配置，建议包含：`resource_id`、`seller_id`、`currency_code`、`price`、`enabled`、`access_expire_mode`、`access_duration_days`。
+
+关键约束：`resource_id` 唯一，确保一条资源只对应一条当前售卖配置。
+
+其中：
+
+- `access_expire_mode` 建议支持：`never`、`purchase`、`first_download`
+- `access_duration_days` 用于表达 3 天、30 天等时效长度
+- 若为永久授权，可令 `access_expire_mode = never` 且 `access_duration_days = null`
+
+### `patch_resource_purchase`
+
+用于记录资源购买结果，建议包含：`resource_id`、`buyer_id`、`seller_id`、`currency_code`、`price`、`status`、`access_started_at`、`access_expires_at`、`first_download_at`、`last_download_at`。
+
+关键约束：`@@unique([resource_id, buyer_id])`，避免重复购买。
+
+推荐语义：
+
+- 若授权从购买时开始计时，则下单成功时直接写入 `access_started_at` 和 `access_expires_at`
+- 若授权从首次下载开始计时，则购买时仅创建记录，首次下载成功时再写入 `first_download_at`、`access_started_at`、`access_expires_at`
+- 若资源永久有效，则 `access_expires_at = null`
+
+## 时效授权规则
+
+### 支持的授权模式
+
+- 永久有效：购买后长期可下载
+- 购买后计时：例如购买成功后 3 天失效
+- 首次下载后计时：例如首次下载后 3 天或 30 天失效
+
+### 推荐优先实现
+
+结合你的描述，第一阶段最值得优先支持的是：
+
+- `永久有效`
+- `首次下载后 N 天失效`
+
+这样可以覆盖：
+
+- 普通永久资源
+- 下载后 3 天失效资源
+- 下载后 30 天失效资源
+
+### 授权判断规则
+
+服务端在判断 `canDownload` 时应按以下顺序处理：
+
+1. 作者本人和管理员始终可访问
+2. 免费资源始终可访问
+3. 未购买用户不可访问
+4. 已购买且永久有效的资源可访问
+5. 已购买但尚未开始计时的“首次下载计时”资源可访问，并在首次真实下载时启动有效期
+6. 已购买且 `access_expires_at > now()` 的资源可访问
+7. 已购买但已过期的资源不可访问
+
+## 第一阶段核心流程
+
+1. 发布者提交资源，并可选开启售卖。
+2. 服务端创建 `patch_resource`，若开启售卖则同步创建 `patch_resource_sale`。
+3. 资源详情接口返回资源列表时，根据用户身份与授权是否过期决定是否返回真实下载信息。
+4. 买家发起购买请求。
+5. 服务端在事务中完成余额校验、买家扣款、卖家加款、双方账本写入、购买记录写入。
+6. 若资源为“首次下载后计时”，则首次真实下载时写入授权开始时间与失效时间。
+7. 买家再次获取资源时，接口根据是否过期切换为“可下载”或“授权已失效”态。
+
+## 仓库接入点
+
+### Prisma
+
+- 新增 `prisma/schema/currency.prisma`，放置新货币相关模型。
+- 在 `prisma/schema/user.prisma` 中仅补 relation，不新增多余额字段。
+- `prisma/schema/patch-resource.prisma` 尽量保持主体简洁，仅通过 relation 接入交易信息。
+
+### Prisma schema 草案
+
+下面的草案遵循当前仓库已经存在的 Prisma 风格：
+
+- 继续使用 `prisma/schema/*.prisma` 拆分模型文件。
+- 模型名与字段名沿用现有下划线风格，例如 `patch_resource`、`user_id`、`created`、`updated`。
+- 关系字段继续显式声明 `fields`、`references`、`onDelete`、`onUpdate`。
+- 第一阶段金额继续使用 `Int`。
+- 所有成交记录显式固化 `currency_code`、`price`、`access_expire_mode`、`access_duration_days`，避免售卖配置变更后影响历史订单。
+
+```prisma
+model currency_definition {
+  id           Int      @id @default(autoincrement())
+  code         String   @unique @db.VarChar(31)
+  name         String   @db.VarChar(107)
+  symbol       String   @default("") @db.VarChar(31)
+  description  String   @default("") @db.VarChar(1007)
+  enabled      Boolean  @default(true)
+  allow_trade  Boolean  @default(true)
+  allow_reward Boolean  @default(false)
+  sort_order   Int      @default(0)
+
+  balance           user_currency_balance[]
+  ledger            currency_ledger[]
+  patch_sale        patch_resource_sale[]
+  patch_purchase    patch_resource_purchase[]
+
+  created DateTime @default(now())
+  updated DateTime @updatedAt
+}
+
+model user_currency_balance {
+  id            Int    @id @default(autoincrement())
+  user_id       Int
+  user          user   @relation("user_currency_balance", fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  currency_code String @db.VarChar(31)
+  currency      currency_definition @relation(fields: [currency_code], references: [code], onDelete: Cascade, onUpdate: NoAction)
+
+  balance       Int    @default(0)
+  total_earned  Int    @default(0)
+  total_spent   Int    @default(0)
+
+  created DateTime @default(now())
+  updated DateTime @updatedAt
+
+  @@unique([user_id, currency_code])
+  @@index([user_id])
+  @@index([currency_code])
+}
+
+model currency_ledger {
+  id                   Int    @id @default(autoincrement())
+  user_id              Int
+  user                 user   @relation("user_currency_ledger", fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  currency_code        String @db.VarChar(31)
+  currency             currency_definition @relation(fields: [currency_code], references: [code], onDelete: Cascade, onUpdate: NoAction)
+  direction            String @db.VarChar(31)
+  amount               Int
+  balance_after        Int
+  biz_type             String @db.VarChar(63)
+  biz_id               String @default("") @db.VarChar(107)
+  counterparty_user_id Int?
+  counterparty_user    user?  @relation("currency_ledger_counterparty", fields: [counterparty_user_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  remark               String @default("") @db.VarChar(1007)
+
+  created DateTime @default(now())
+  updated DateTime @updatedAt
+
+  @@index([user_id, currency_code])
+  @@index([biz_type, biz_id])
+  @@index([counterparty_user_id])
+}
+
+model patch_resource_sale {
+  id                   Int    @id @default(autoincrement())
+  resource_id          Int    @unique
+  resource             patch_resource @relation("patch_resource_sale", fields: [resource_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  seller_id            Int
+  seller               user   @relation("patch_resource_sale_seller", fields: [seller_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  currency_code        String @db.VarChar(31)
+  currency             currency_definition @relation(fields: [currency_code], references: [code], onDelete: NoAction, onUpdate: NoAction)
+  price                Int
+  enabled              Boolean @default(false)
+  access_expire_mode   String @default("never") @db.VarChar(31)
+  access_duration_days Int?
+
+  created DateTime @default(now())
+  updated DateTime @updatedAt
+
+  @@index([seller_id])
+  @@index([currency_code])
+  @@index([enabled])
+}
+
+model patch_resource_purchase {
+  id                   Int    @id @default(autoincrement())
+  resource_id          Int
+  resource             patch_resource @relation("patch_resource_purchase", fields: [resource_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  buyer_id             Int
+  buyer                user   @relation("patch_resource_purchase_buyer", fields: [buyer_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  seller_id            Int
+  seller               user   @relation("patch_resource_purchase_seller", fields: [seller_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  currency_code        String @db.VarChar(31)
+  currency             currency_definition @relation(fields: [currency_code], references: [code], onDelete: NoAction, onUpdate: NoAction)
+  price                Int
+  status               String @default("paid") @db.VarChar(31)
+  access_expire_mode   String @default("never") @db.VarChar(31)
+  access_duration_days Int?
+  access_started_at    DateTime?
+  access_expires_at    DateTime?
+  first_download_at    DateTime?
+  last_download_at     DateTime?
+
+  created DateTime @default(now())
+  updated DateTime @updatedAt
+
+  @@unique([resource_id, buyer_id])
+  @@index([buyer_id])
+  @@index([seller_id])
+  @@index([currency_code])
+  @@index([status])
+  @@index([buyer_id, access_expires_at])
+}
+```
+
+### relation 补充点
+
+`prisma/schema/user.prisma` 建议新增 relation：
+
+```prisma
+currency_balance             user_currency_balance[] @relation("user_currency_balance")
+currency_ledger              currency_ledger[]       @relation("user_currency_ledger")
+currency_ledger_counterparty currency_ledger[]       @relation("currency_ledger_counterparty")
+patch_resource_sale          patch_resource_sale[]   @relation("patch_resource_sale_seller")
+patch_resource_purchase_buy  patch_resource_purchase[] @relation("patch_resource_purchase_buyer")
+patch_resource_purchase_sell patch_resource_purchase[] @relation("patch_resource_purchase_seller")
+```
+
+`prisma/schema/patch-resource.prisma` 建议新增 relation：
+
+```prisma
+sale     patch_resource_sale?       @relation("patch_resource_sale")
+purchase patch_resource_purchase[]  @relation("patch_resource_purchase")
+```
+
+### 草案说明
+
+- `currency_code` 直接作为业务主键参与关联，便于接口与账本始终显式携带币种。
+- `patch_resource_sale` 保存“当前售卖配置”，`patch_resource_purchase` 保存“历史成交快照”，两者职责分离。
+- `patch_resource_purchase` 中重复保存 `access_expire_mode` 与 `access_duration_days`，是为了避免资源后续改价、改时效后污染历史授权判断。
+- `@@unique([resource_id, buyer_id])` 适合第一阶段“同一资源只允许存在一条有效购买记录”的业务假设；若后续要做续期或重新购买，再改为订单表 + 授权表拆分会更稳。
+
+### 校验与常量
+
+- 新增 `constants/currency.ts`，定义账本方向、业务类型、默认交易币种等常量。
+- 扩展 `validations/patch.ts`，为资源发布与更新增加可选字段：`enableSale`、`saleCurrencyCode`、`salePrice`、`saleAccessExpireMode`、`saleAccessDurationDays`。
+
+### 接口
+
+- `app/api/patch/resource/get.ts`：按权限与有效期决定是否返回 `content`、`code`、`password`。
+- `app/api/patch/resource/create.ts`：创建资源后按需写入 `patch_resource_sale`。
+- `app/api/patch/resource/update.ts`：支持售卖开关、币种、价格更新。
+- 新增 `app/api/patch/resource/purchase/route.ts`：处理购买事务。
+- 新增 `app/api/currency/balance/route.ts`：返回用户货币余额。
+- 改造 `app/api/patch/resource/download/route.ts` 或新增独立授权下载接口，在首次真实下载时启动倒计时授权。
+
+### 类型与前端
+
+- 扩展 `types/api/patch.ts` 中的 `PatchResource`，增加 `isPaid`、`hasPurchased`、`canDownload`、`accessExpiresAt`、`accessStatus`、`sale`。
+- 扩展 `components/patch/resource/publish/PublishResource.tsx`，增加售卖开关、币种、价格输入、授权有效期配置。
+- 改造 `components/patch/resource/ResourceDownload.tsx` 与 `DownloadCard.tsx`，从单一“下载态”扩展为“下载态 / 购买态 / 已过期态”。
+
+## 文件级改造清单
+
+### 1. Prisma 文件
+
+`prisma/schema/currency.prisma`
+
+- 新增 `currency_definition`、`user_currency_balance`、`currency_ledger`、`patch_resource_sale`、`patch_resource_purchase` 五个模型。
+- 第一阶段不强制引入 Prisma enum，继续沿用当前项目更常见的字符串状态风格。
+
+`prisma/schema/user.prisma`
+
+- 仅补 relation。
+- 不新增 `gold`、`ticket` 这类余额字段。
+- relation 命名保持与现有 `user_patch_resource`、`conversation_user_a` 类似的显式风格。
+
+`prisma/schema/patch-resource.prisma`
+
+- 仅补 `sale` 与 `purchase` relation。
+- 不把价格、币种、授权失效字段直接堆回 `patch_resource` 主表。
+
+### 2. 校验与常量
+
+`validations/patch.ts`
+
+- 在 `patchResourceCreateSchema` 与 `patchResourceUpdateSchema` 中新增可选字段：
+  - `enableSale`
+  - `saleCurrencyCode`
+  - `salePrice`
+  - `saleAccessExpireMode`
+  - `saleAccessDurationDays`
+- 规则建议：
+  - `enableSale = false` 时，上述售卖字段可为空
+  - `enableSale = true` 时，`saleCurrencyCode` 与 `salePrice` 必填
+  - `saleAccessExpireMode` 只允许 `never`、`purchase`、`first_download`
+  - 当模式不是 `never` 时，`saleAccessDurationDays` 必须为正整数
+- 新增购买接口校验，例如 `purchasePatchResourceSchema`，至少包含 `resourceId`。
+- 若下载接口改为授权下载接口，则新增专用 schema，而不是继续只复用下载计数 schema。
+
+`constants/currency.ts`
+
+- 建议按项目现有常量风格组织：
+  - `SUPPORTED_CURRENCY_CODE`
+  - `SUPPORTED_CURRENCY_CODE_MAP`
+  - `CURRENCY_LEDGER_DIRECTION_MAP`
+  - `CURRENCY_BIZ_TYPE_MAP`
+  - `RESOURCE_ACCESS_EXPIRE_MODE_MAP`
+  - `RESOURCE_ACCESS_STATUS_MAP`
+
+### 3. 资源接口改造点
+
+`app/api/patch/resource/route.ts`
+
+- 当前已经统一承接资源 `POST / PUT`。
+- 可以继续保持这个入口不变，仅让它把新增售卖字段传入业务层。
+
+`app/api/patch/resource/create.ts`
+
+- 当前 `createPatchResource()` 已负责资源主体创建。
+- 下一步应在创建 `patch_resource` 后，根据 `enableSale` 决定是否同步创建 `patch_resource_sale`。
+- 若资源进入待审核状态，第一阶段仍可允许先写售卖配置，也可选择仅在审核通过后再启用 `enabled`，这一点需要后续统一策略。
+
+`app/api/patch/resource/update.ts`
+
+- 当前 `updatePatchResource()` 已是资源编辑主入口。
+- 下一步应在更新主体信息后，执行售卖配置的 `upsert` / `disable`：
+  - `enableSale = false`：关闭 `patch_resource_sale.enabled`
+  - `enableSale = true`：更新币种、价格、授权模式、时长
+- 因为 `app/api/admin/resource/update.ts` 复用了这里的逻辑，所以尽量在这一层统一处理，避免管理端分叉。
+
+`app/api/patch/resource/get.ts`
+
+- 当前会直接返回 `content`、`code`、`password`。
+- 下一步需要把查询改成：
+  - `include sale`
+  - 对当前登录用户按需 `include purchase`
+- 返回数据时按权限裁剪：
+  - 免费资源：直接返回真实下载信息
+  - 作者本人 / 管理员：直接返回真实下载信息
+  - 已购且未过期：返回真实下载信息
+  - 未购买 / 已过期：返回空的 `content`、`code`、`password`
+- 同时补充：
+  - `isPaid`
+  - `hasPurchased`
+  - `canDownload`
+  - `accessStatus`
+  - `accessExpiresAt`
+  - `sale`
+
+`app/api/patch/resource/purchase/route.ts`
+
+- 新增购买事务接口。
+- 核心事务建议顺序：
+  1. 校验登录
+  2. 校验资源存在、可售、非本人购买
+  3. 校验是否已购
+  4. 校验买家余额
+  5. 扣减买家余额
+  6. 增加卖家余额
+  7. 写入双方账本
+  8. 写入 `patch_resource_purchase`
+
+`app/api/patch/resource/download/route.ts`
+
+- 当前仅增加下载数，不做授权判断。
+- 第一阶段若要支持“首次下载后计时”，这里必须升级为服务端授权入口，而不只是统计入口。
+- 推荐行为：
+  - 校验当前用户是否可下载
+  - 若是 `first_download` 且 `access_started_at` 为空，则在事务中初始化：
+    - `first_download_at`
+    - `access_started_at`
+    - `access_expires_at`
+  - 成功后再增加下载计数
+- 若后续决定把“下载鉴权”和“下载计数”分离，也可以新增独立授权下载接口，但不要继续把授权逻辑留在前端。
+
+### 4. 类型与前端改造点
+
+`types/api/patch.ts`
+
+- 当前已完成 `PatchResourceSaleInfo`、`PatchResourceAccessExpireMode`、`PatchResourceAccessStatus` 等共享类型。
+- `PatchResource` 已扩展为交易态资源结构，前端可直接消费：
+  - `sale`
+  - `isPaid`
+  - `hasPurchased`
+  - `requiresLogin`
+  - `canDownload`
+  - `accessStatus`
+  - `accessStartedAt`
+  - `accessExpiresAt`
+  - `accessDurationDays`
+- `PatchResourceDownloadPayload` 只通过下载授权接口返回真实下载信息，不再依赖公开 GET 暴露敏感字段。
+
+`components/patch/resource/publish/PublishResource.tsx`
+
+- 当前发布表单已补齐售卖默认值，并保持默认关闭，不影响原有免费资源流程。
+- `ResourceDetailsForm.tsx` 已接入售卖配置区，支持是否开启售卖、交易币种、售价、授权模式与授权天数配置。
+
+`components/patch/resource/ResourceDownload.tsx`
+
+- 当前下载区已按 `accessStatus` 渲染不同交互：登录引导、购买提示、过期提示、未开始计时提示与真实下载入口。
+- 资源状态更新已上提到 `components/patch/resource/Tabs.tsx`，购买或下载成功后会同步刷新详情卡展示。
+
+`components/patch/resource/DownloadCard.tsx`
+
+- 当前已改为状态分支卡片：
+  - `guest`：提示登录
+  - `not_purchased`：提示购买
+  - `expired`：提示授权失效
+  - `free / owner / owned / not_started`：允许请求下载授权接口
+- 点击下载时通过 `/patch/resource/download` 返回真实下载链接、提取码、解压码与最新授权时间，不再从公开接口读取这些字段。
+
+### 5. 推荐返回结构
+
+为了减少前端重复判断，`getPatchResource()` 当前已经直接回包下列字段：
+
+- `isPaid`
+- `hasPurchased`
+- `requiresLogin`
+- `canDownload`
+- `accessStatus`
+- `accessStartedAt`
+- `accessExpiresAt`
+- `accessDurationDays`
+- `sale`
+
+其中 `accessStatus` 当前收敛为：
+
+- `guest`
+- `free`
+- `owner`
+- `owned`
+- `not_purchased`
+- `expired`
+- `not_started`
+
+### 6. 最小落地顺序
+
+如果后面开始真实改代码，最稳的顺序建议是：
+
+1. 先补 Prisma 模型与 relation
+2. 再补 `constants/currency.ts` 与 `validations/patch.ts`
+3. 再改 `app/api/patch/resource/create.ts` / `update.ts`
+4. 再改 `app/api/patch/resource/get.ts`
+5. 再新增 `app/api/patch/resource/purchase/route.ts`
+6. 最后改 `app/api/patch/resource/download/route.ts` 与前端下载态
+
+如果把“已购资源页”也纳入第一阶段一起落地，建议继续按下面的文件级顺序推进：
+
+7. 先扩展 `types/api/user.ts`
+   - 新增 `UserPurchasedResource`
+   - 先把前后端共享类型稳定下来，避免后续接口与组件来回改字段
+8. 再新增 `app/api/user/profile/purchase/route.ts`
+   - 先把 `patch_resource_purchase` 的查询聚合跑通
+   - 返回 `resources + total`
+9. 再新增 `app/user/[id]/purchase/actions.ts`
+   - 复用当前 `app/user/[id]/resource/actions.ts` 的 server action 风格
+   - 在这里做登录校验与参数安全解析
+10. 再新增 `components/user/purchase/Card.tsx`
+    - 先定单卡展示字段
+    - 包括资源地址、价格、最近下载时间、过期时间、状态按钮
+11. 再新增 `components/user/purchase/Container.tsx`
+    - 复用 `components/user/resource/Container.tsx` 的分页列表模式
+    - 对接 `/user/profile/purchase` 分页拉取
+12. 再改 `components/user/Activity.tsx`
+    - 新增 `purchase / 已购资源` tab
+    - 这是页面入口接入点，建议放在组件完成后再改，避免出现空路由入口
+13. 最后新增 `app/user/[id]/purchase/page.tsx`
+    - 复用 `app/user/[id]/resource/page.tsx` 的首屏数据获取方式
+    - 用于串起 page -> action -> api -> container 的完整链路
+
+## 真实 Prisma schema 文件改动稿
+
+下面这一层不再只是“模型草案”，而是按当前仓库的 Prisma 拆分方式，继续细化到可直接落地成文件的改动稿。
+
+### `prisma/schema/currency.prisma`
+
+```prisma
+model currency_definition {
+  id           Int      @id @default(autoincrement())
+  code         String   @unique @db.VarChar(31)
+  name         String   @db.VarChar(107)
+  symbol       String   @default("") @db.VarChar(31)
+  description  String   @default("") @db.VarChar(1007)
+  enabled      Boolean  @default(true)
+  allow_trade  Boolean  @default(true)
+  allow_reward Boolean  @default(false)
+  sort_order   Int      @default(0)
+
+  balance        user_currency_balance[]
+  ledger         currency_ledger[]
+  patch_sale     patch_resource_sale[]
+  patch_purchase patch_resource_purchase[]
+
+  created DateTime @default(now())
+  updated DateTime @updatedAt
+}
+
+model user_currency_balance {
+  id            Int                 @id @default(autoincrement())
+  user_id       Int
+  user          user                @relation("user_currency_balance", fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  currency_code String              @db.VarChar(31)
+  currency      currency_definition @relation(fields: [currency_code], references: [code], onDelete: Cascade, onUpdate: NoAction)
+  balance       Int                 @default(0)
+  total_earned  Int                 @default(0)
+  total_spent   Int                 @default(0)
+
+  created DateTime @default(now())
+  updated DateTime @updatedAt
+
+  @@unique([user_id, currency_code])
+  @@index([user_id])
+  @@index([currency_code])
+}
+
+model currency_ledger {
+  id                   Int                 @id @default(autoincrement())
+  user_id              Int
+  user                 user                @relation("user_currency_ledger", fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  currency_code        String              @db.VarChar(31)
+  currency             currency_definition @relation(fields: [currency_code], references: [code], onDelete: Cascade, onUpdate: NoAction)
+  direction            String              @db.VarChar(31)
+  amount               Int
+  balance_after        Int
+  biz_type             String              @db.VarChar(63)
+  biz_id               String              @default("") @db.VarChar(107)
+  counterparty_user_id Int?
+  counterparty_user    user?               @relation("currency_ledger_counterparty", fields: [counterparty_user_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  remark               String              @default("") @db.VarChar(1007)
+
+  created DateTime @default(now())
+  updated DateTime @updatedAt
+
+  @@index([user_id, currency_code])
+  @@index([biz_type, biz_id])
+  @@index([counterparty_user_id])
+}
+
+model patch_resource_sale {
+  id                   Int                 @id @default(autoincrement())
+  resource_id          Int                 @unique
+  resource             patch_resource      @relation("patch_resource_sale", fields: [resource_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  seller_id            Int
+  seller               user                @relation("patch_resource_sale_seller", fields: [seller_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  currency_code        String              @db.VarChar(31)
+  currency             currency_definition @relation(fields: [currency_code], references: [code], onDelete: NoAction, onUpdate: NoAction)
+  price                Int
+  enabled              Boolean             @default(false)
+  access_expire_mode   String              @default("never") @db.VarChar(31)
+  access_duration_days Int?
+
+  created DateTime @default(now())
+  updated DateTime @updatedAt
+
+  @@index([seller_id])
+  @@index([currency_code])
+  @@index([enabled])
+}
+
+model patch_resource_purchase {
+  id                   Int                 @id @default(autoincrement())
+  resource_id          Int
+  resource             patch_resource      @relation("patch_resource_purchase", fields: [resource_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  buyer_id             Int
+  buyer                user                @relation("patch_resource_purchase_buyer", fields: [buyer_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  seller_id            Int
+  seller               user                @relation("patch_resource_purchase_seller", fields: [seller_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  currency_code        String              @db.VarChar(31)
+  currency             currency_definition @relation(fields: [currency_code], references: [code], onDelete: NoAction, onUpdate: NoAction)
+  price                Int
+  status               String              @default("paid") @db.VarChar(31)
+  access_expire_mode   String              @default("never") @db.VarChar(31)
+  access_duration_days Int?
+  access_started_at    DateTime?
+  access_expires_at    DateTime?
+  first_download_at    DateTime?
+  last_download_at     DateTime?
+
+  created DateTime @default(now())
+  updated DateTime @updatedAt
+
+  @@unique([resource_id, buyer_id])
+  @@index([buyer_id])
+  @@index([seller_id])
+  @@index([currency_code])
+  @@index([status])
+  @@index([buyer_id, access_expires_at])
+}
+```
+
+### `prisma/schema/user.prisma`
+
+建议在 `model user` 中追加 relation：
+
+```prisma
+  currency_balance             user_currency_balance[]   @relation("user_currency_balance")
+  currency_ledger              currency_ledger[]         @relation("user_currency_ledger")
+  currency_ledger_counterparty currency_ledger[]         @relation("currency_ledger_counterparty")
+  patch_resource_sale          patch_resource_sale[]     @relation("patch_resource_sale_seller")
+  patch_resource_purchase_buy  patch_resource_purchase[] @relation("patch_resource_purchase_buyer")
+  patch_resource_purchase_sell patch_resource_purchase[] @relation("patch_resource_purchase_seller")
+```
+
+### `prisma/schema/patch-resource.prisma`
+
+建议在 `model patch_resource` 中追加 relation：
+
+```prisma
+  sale     patch_resource_sale?      @relation("patch_resource_sale")
+  purchase patch_resource_purchase[] @relation("patch_resource_purchase")
+```
+
+### Prisma 落地说明
+
+- 当前项目使用 `schema: 'prisma/schema'`，因此新增 `currency.prisma` 即可被 Prisma 识别。
+- 当前项目倾向使用字符串状态字段，因此第一阶段可继续用 `String @db.VarChar(...)` 表示：
+  - `direction`
+  - `biz_type`
+  - `status`
+  - `access_expire_mode`
+- 若后续状态稳定，再考虑替换为 Prisma enum。
+
+## 购买接口与下载授权接口的详细设计
+
+这一层按当前仓库现有风格设计：
+
+- 路由层负责 `kunParsePostBody / kunParsePutBody`
+- 鉴权继续使用 `verifyHeaderCookie(req)`
+- 返回结构继续使用 `KunResponse<T>`，即 `string | T`
+- 真正的事务逻辑尽量下沉到同目录业务文件
+
+### 一、建议新增或扩展的校验 schema
+
+`validations/patch.ts`
+
+```ts
+export const purchasePatchResourceSchema = z.object({
+  resourceId: z.coerce
+    .number({ message: '资源 ID 必须为数字' })
+    .min(1)
+    .max(9999999)
+})
+
+export const accessPatchResourceDownloadSchema = z.object({
+  patchId: z.coerce
+    .number({ message: '游戏 ID 必须为数字' })
+    .min(1)
+    .max(9999999),
+  resourceId: z.coerce
+    .number({ message: '资源 ID 必须为数字' })
+    .min(1)
+    .max(9999999)
+})
+```
+
+第一阶段购买接口不建议让前端提交 `price`、`currencyCode`。
+
+原因：
+
+- 成交价格应以服务端当前售卖配置为准
+- 成交币种应以服务端当前售卖配置为准
+- 前端只传 `resourceId`，可以减少篡改风险
+
+### 二、建议新增的返回类型
+
+`types/api/patch.ts`
+
+```ts
+export interface PatchResourceSaleInfo {
+  currencyCode: string
+  price: number
+  accessExpireMode: string
+  accessDurationDays: number | null
+}
+
+export interface PatchResourcePurchaseResult {
+  resourceId: number
+  hasPurchased: boolean
+  canDownload: boolean
+  accessStatus: string
+  accessExpiresAt: string | null
+  sale: PatchResourceSaleInfo
+}
+
+export interface PatchResourceDownloadAccessResult {
+  resourceId: number
+  patchId: number
+  content: string
+  code: string
+  password: string
+  accessStatus: string
+  accessExpiresAt: string | null
+}
+```
+
+### 三、购买接口设计
+
+#### 路由文件
+
+建议新增：
+
+- `app/api/patch/resource/purchase/route.ts`
+- `app/api/patch/resource/purchase.ts`
+
+其中：
+
+- `route.ts` 只处理请求解析、登录校验、返回 `NextResponse`
+- `purchase.ts` 负责 Prisma 事务
+
+#### 请求
+
+`POST /api/patch/resource/purchase`
+
+请求体：
+
+```json
+{ "resourceId": 123 }
+```
+
+#### 成功返回
+
+```json
+{
+  "resourceId": 123,
+  "hasPurchased": true,
+  "canDownload": true,
+  "accessStatus": "owned",
+  "accessExpiresAt": null,
+  "sale": {
+    "currencyCode": "coin",
+    "price": 100,
+    "accessExpireMode": "never",
+    "accessDurationDays": null
+  }
+}
+```
+
+#### 路由层职责
+
+`app/api/patch/resource/purchase/route.ts` 建议流程：
+
+1. `const input = await kunParsePostBody(req, purchasePatchResourceSchema)`
+2. 若校验失败，直接 `NextResponse.json(errorMessage)`
+3. `const payload = await verifyHeaderCookie(req)`
+4. 未登录则返回 `NextResponse.json('用户未登录')`
+5. 调用 `purchasePatchResource(input, payload.uid, payload.role)`
+6. `return NextResponse.json(response)`
+
+#### 事务层职责
+
+`purchasePatchResource()` 建议完整校验顺序：
+
+1. 查询资源主体 + `sale` + 作者信息
+2. 校验资源存在且 `status = 0`
+3. 校验存在可用售卖配置：
+   - `sale.enabled = true`
+4. 校验买家不是作者本人
+5. 校验币种存在且可交易：
+   - `currency_definition.enabled = true`
+   - `currency_definition.allow_trade = true`
+6. 校验买家是否已有购买记录
+7. 查询买家余额记录，不存在则视为 `0`
+8. 校验余额是否足够
+9. 开启事务执行：
+   - 再次锁定/读取 `patch_resource_purchase`
+   - 扣减买家余额
+   - 增加卖家余额
+   - 更新买家 `total_spent`
+   - 更新卖家 `total_earned`
+   - 写入买家账本
+   - 写入卖家账本
+   - 写入购买记录
+
+#### 购买记录写入规则
+
+若售卖配置为：
+
+- `never`
+  - `access_started_at = now()`
+  - `access_expires_at = null`
+- `purchase`
+  - `access_started_at = now()`
+  - `access_expires_at = now() + N days`
+- `first_download`
+  - `access_started_at = null`
+  - `access_expires_at = null`
+  - 等首次真实下载时再初始化
+
+#### 账本建议写法
+
+买家账本：
+
+- `direction = 'expense'`
+- `biz_type = 'resource_purchase'`
+- `biz_id = String(resourceId)`
+- `counterparty_user_id = sellerId`
+
+卖家账本：
+
+- `direction = 'income'`
+- `biz_type = 'resource_sale'`
+- `biz_id = String(resourceId)`
+- `counterparty_user_id = buyerId`
+
+#### 建议错误文案
+
+- `未找到该资源`
+- `该资源暂未开放购买`
+- `您不能购买自己发布的资源`
+- `您已购买过该资源`
+- `该交易币种不可用`
+- `您的余额不足`
+
+### 四、下载授权接口设计
+
+#### 路由文件
+
+建议保留现有路径，直接升级：
+
+- `app/api/patch/resource/download/route.ts`
+
+并拆出业务文件：
+
+- `app/api/patch/resource/download.ts`
+
+这样对前端改动最小，后续只需要把当前“记下载数”的逻辑替换为“授权 + 记下载数”。
+
+#### 请求
+
+`PUT /api/patch/resource/download`
+
+请求体：
+
+```json
+{
+  "patchId": 1,
+  "resourceId": 123
+}
+```
+
+#### 成功返回
+
+```json
+{
+  "resourceId": 123,
+  "patchId": 1,
+  "content": "https://...",
+  "code": "abcd",
+  "password": "pass",
+  "accessStatus": "owned",
+  "accessExpiresAt": "2026-03-20T12:00:00.000Z"
+}
+```
+
+#### 路由层职责
+
+1. `const input = await kunParsePutBody(req, accessPatchResourceDownloadSchema)`
+2. `const payload = await verifyHeaderCookie(req)`
+3. 未登录返回 `NextResponse.json('用户未登录')`
+4. 调用 `accessPatchResourceDownload(input, payload.uid, payload.role)`
+5. 返回 `NextResponse.json(response)`
+
+#### 事务层职责
+
+`accessPatchResourceDownload()` 建议处理顺序：
+
+1. 查询资源主体 + `sale` + 当前用户购买记录
+2. 若资源不存在或状态不正常，返回错误
+3. 作者本人 / 管理员直接允许下载
+4. 若无 `sale` 或 `sale.enabled = false`，视为免费资源，直接允许下载
+5. 若不存在购买记录，返回 `您尚未购买该资源`
+6. 若已存在 `access_expires_at` 且已过期，返回 `该资源授权已失效`
+7. 若 `access_expire_mode = 'first_download'` 且 `access_started_at` 为空：
+   - 在事务中再次读取购买记录
+   - 仅第一次成功请求写入：
+     - `first_download_at = now()`
+     - `access_started_at = now()`
+     - `access_expires_at = now() + N days`
+8. 增加 `patch.download`
+9. 增加 `patch_resource.download`
+10. 更新 `patch_resource_purchase.last_download_at = now()`
+11. 返回真实下载信息
+
+#### 并发控制要求
+
+“首次下载后计时”必须防止并发重复初始化。
+
+建议最低要求：
+
+- 在事务内通过 `where: { id, access_started_at: null }` 的条件更新购买记录
+- 只有命中的那一次请求可以写入首次下载时间
+- 其他并发请求重新读取最新购买记录并继续返回
+
+这样可以避免多个设备同时点击下载时，把有效期多次重置。
+
+#### 建议错误文案
+
+- `未找到该资源`
+- `您尚未购买该资源`
+- `该资源授权已失效`
+- `资源下载授权初始化失败，请重试`
+
+### 五、与 `getPatchResource()` 的配合
+
+购买接口与下载授权接口已经和 `app/api/patch/resource/get.ts` 形成完整配合，公开资源接口现在承担“资源状态聚合 + 敏感字段脱敏”职责。
+
+当前公开返回的核心字段包括：
+
+- `isPaid`
+- `hasPurchased`
+- `requiresLogin`
+- `canDownload`
+- `accessStatus`
+- `accessStartedAt`
+- `accessExpiresAt`
+- `accessDurationDays`
+- `sale`
+
+当前判定范围包括：
+
+- `guest`：未登录用户访问需要鉴权的资源
+- `free`：没有有效售卖配置
+- `owner`：作者本人或管理员
+- `owned`：有权下载
+- `not_purchased`：付费但未购买
+- `expired`：购买过但已过期
+- `not_started`：已购买且首次下载后才开始计时
+
+这样前端：
+
+- 列表页/详情页先根据 `get.ts` 渲染状态
+- 点击购买调用购买接口
+- 点击下载调用下载授权接口
+- 不再依赖 `get.ts` 直接暴露真实链接给未授权用户
+
+### 六、推荐代码组织
+
+为了尽量贴合当前仓库的写法，建议最终目录组织如下：
+
+```text
+app/api/patch/resource/
+  route.ts
+  get.ts
+  create.ts
+  update.ts
+  delete.ts
+  purchase.ts
+  purchase/route.ts
+  download.ts
+  download/route.ts
+```
+
+其中：
+
+- `route.ts` 继续负责资源主体 CRUD 聚合入口
+- `purchase/route.ts` 与 `download/route.ts` 分别负责独立业务动作
+- `purchase.ts` 与 `download.ts` 负责事务逻辑，便于后续复用与测试
+
+## 已购资源 / 下载记录页面设计
+
+结合当前仓库用户中心结构，当前已经落地“已购资源”页，而不是直接做“每次下载行为明细页”。
+
+原因：
+
+- 用户中心已接入 `purchase / 已购资源` tab，延续了现有页面结构。
+- `patch_resource_purchase` 已作为“我买过什么、当前还能不能下”的主数据源。
+- 若后续要展示“每一次下载行为明细”，仍需额外补下载日志表，这不属于当前第一阶段闭环。
+
+### 一、推荐页面入口
+
+当前已新增：
+
+- `app/user/[id]/purchase/page.tsx`
+- `app/user/[id]/purchase/actions.ts`
+- `app/api/user/profile/purchase/route.ts`
+- `components/user/purchase/Container.tsx`
+- `components/user/purchase/Card.tsx`
+
+并且已经在 `components/user/Activity.tsx` 中增加新 tab：
+
+- `purchase` / `已购资源`
+
+当前实现仍仅允许“用户查看自己的已购资源页”，不开放查看他人的购买记录。
+
+### 二、页面字段设计
+
+你补充的字段可以落成下面这组展示项：
+
+- 页面当前展示：
+  - 游戏名 `patchName`
+  - 资源名 `resourceName`
+  - 资源来源类型 `storage`
+  - 购买价格 `price + currencyCode`
+  - 当前授权状态 `accessStatus`
+  - 购买时间 `purchasedAt`
+  - 最近下载时间 `downloadedAt`
+  - 授权开始时间 `accessStartedAt`
+  - 授权到期时间 `accessExpiresAt`
+- 购买价格
+  - 当前显示为 `100 coin` 这类“数值 + 币种”组合
+  - 实际读取 `patch_resource_purchase.price` 与 `currency_code`
+- 下载链接
+  - 当前已购资源页只负责展示购买记录与授权状态，不在列表页直接暴露真实下载链接
+  - 用户进入资源详情页后，再通过下载授权接口获取真实链接
+- 下载时间
+  - 当前优先展示 `last_download_at`，表示最近一次下载时间
+  - 若从未下载，则可显示“未下载”
+- 链接失效时间
+  - 直接显示 `access_expires_at`
+  - 若永久有效，则显示“永久有效”
+
+### 三、推荐返回类型
+
+`types/api/user.ts` 当前已新增：
+
+```ts
+export interface UserPurchasedResource {
+  purchaseId: number
+  resourceId: number
+  resourceName: string
+  patchId: number
+  patchUniqueId: string
+  patchName: string
+  patchBanner: string
+  storage: string
+  price: number
+  currencyCode: string
+  downloadedAt: string | null
+  accessStartedAt: string | null
+  accessExpiresAt: string | null
+  accessStatus: PatchResourceAccessStatus
+  canDownload: boolean
+  purchasedAt: string
+}
+```
+
+其中：
+
+- `downloadedAt` 第一阶段直接映射 `last_download_at`
+- `purchasedAt` 映射 `patch_resource_purchase.created`
+- `accessStatus` 当前沿用：
+  - `owned`
+  - `expired`
+  - `not_started`
+
+### 四、接口设计
+
+当前已新增：
+
+- `GET /api/user/profile/purchase?uid=1&page=1&limit=20`
+
+接口职责已经落实为：
+
+1. 校验登录
+2. 校验 `payload.uid === input.uid`，第一阶段不允许查看他人的已购记录
+3. 分页查询 `patch_resource_purchase`
+4. `include` 资源主体、所属游戏、售卖币种必要信息
+5. 聚合出前端直接可渲染的字段
+
+当前查询条件：
+
+- `buyer_id = uid`
+- `status = 'paid'`
+- 按 `created desc` 排序
+
+当前回包结构示意：
+
+```json
+{
+  "resources": [
+    {
+      "purchaseId": 1,
+      "resourceId": 123,
+      "resourceName": "本体 + FD 整合包",
+      "patchId": 66,
+      "patchUniqueId": "clannad",
+      "patchName": "CLANNAD",
+      "patchBanner": "https://...",
+      "storage": "s3",
+      "price": 100,
+      "currencyCode": "coin",
+      "downloadedAt": "2026-03-11T10:00:00.000Z",
+      "accessStartedAt": "2026-03-11T10:00:00.000Z",
+      "accessExpiresAt": "2026-03-14T10:00:00.000Z",
+      "accessStatus": "owned",
+      "canDownload": true,
+      "purchasedAt": "2026-03-11T09:00:00.000Z"
+    }
+  ],
+  "total": 1
+}
+```
+
+### 五、页面渲染建议
+
+为了贴合当前 `components/user/resource` 的实现风格，当前实现继续使用“卡片列表”，而不是后台式表格。
+
+当前每张卡片包含：
+
+- 游戏封面 + 游戏名
+- 资源名 / 资源类型 / 存储类型
+- 购买价格 / 币种
+- 最近下载时间
+- 授权开始时间
+- 授权失效时间
+- 当前状态标签：
+  - `可下载`
+  - `未开始下载`
+  - `已过期`
+- 操作按钮：
+  - `继续下载`
+  - `前往资源页`
+
+### 六、与下载授权接口的配合
+
+这个页面不建议自己拼真实下载链接，而是继续走：
+
+- `PUT /api/patch/resource/download`
+
+也就是说：
+
+- 页面列表只负责展示已购资源与授权状态
+- 用户点击“继续下载”后，再调用下载授权接口
+- 服务端确认权限后返回真实下载信息
+
+这样可以避免“已购资源页”再次绕过授权逻辑直接暴露链接。
+
+### 七、如果后续真的要做“下载记录明细”
+
+如果你后面说的“下载时间”指的是“每一次下载都要有一条历史记录”，那就不应只用 `patch_resource_purchase`。
+
+那时建议再新增例如：
+
+- `patch_resource_download_log`
+
+建议字段：
+
+- `id`
+- `purchase_id`
+- `resource_id`
+- `user_id`
+- `downloaded_at`
+- `client_ip`（可选）
+- `user_agent`（可选）
+
+这样才能真正支持：
+
+- 下载明细页
+- 最近下载时间统计
+- 下载次数按用户维度审计
+
+但第一阶段如果只为了完成交易闭环，我更建议先做“已购资源页”，把“最近下载时间 + 授权失效时间 + 继续下载”这条链路先跑通。
+
+## 登录墙与 Google 收录兼容方案
+
+### 一、先说结论
+
+“普通用户必须登录后才能查看网站内容”与“Google 仍能抓取完整页面内容”这两个目标天然存在直接冲突。
+
+原因很简单：
+
+- 你如果在 `middleware.ts` 里把公开页面也统一重定向到 `/login`
+- 那 Googlebot 请求这些 URL 时，同样也会拿到登录跳转
+- 结果就是搜索引擎无法抓到原始页面内容
+
+所以这件事不能简单理解成“给 Google 放开 robots 就行”。
+
+### 二、当前仓库现状
+
+当前项目实际上是“部分页面登录保护 + 公开内容页可索引”的模式：
+
+- `middleware.ts` 当前 matcher 只拦：
+  - `/admin/:path*`
+  - `/user/:path*`
+  - `/comment/:path*`
+  - `/edit/:path*`
+- `middleware/auth.ts` 中 `protectedPaths = ['/admin', '/user', '/comment', '/edit']`
+- `app/metadata.ts` 默认：
+  - `robots.index = true`
+  - `robots.googleBot.index = true`
+- `public/robots.txt` 当前禁止抓取：
+  - `/message`
+  - `/admin`
+  - `/user`
+  - `/tag`
+- `scripts/generateKunSitemap.ts` 当前会排除：
+  - `admin`
+  - `edit`
+  - `message`
+  - `user`
+  - 但会继续保留公开内容页和文档页进入 sitemap
+
+也就是说，当前仓库本身就是按“公开内容页负责 SEO，个人中心/后台/消息页不参与收录”的思路组织的。
+
+### 三、不推荐的方案
+
+#### 方案 1：全站都走 middleware 登录跳转
+
+例如把 matcher 扩大成：
+
+- `/((?!api|_next|favicon.ico).*)`
+
+这种方案不适合你当前项目，因为：
+
+- 会把首页、资源页、文档页、搜索页一起挡掉
+- Google 抓取时同样会被重定向到登录页
+- sitemap 即便继续提交公开 URL，也抓不到真实内容
+
+#### 方案 2：按 User-Agent 只给 Googlebot 放行
+
+技术上可以做，但不建议作为标准方案。
+
+原因：
+
+- 本质上会把“用户看到的内容”和“爬虫拿到的内容”拆成两套逻辑
+- 很容易接近 cloaking 风险
+- 后续维护复杂，且难以保证所有搜索引擎与预览爬虫行为一致
+
+第一阶段不建议走这条路线。
+
+### 四、最推荐的方案
+
+对你这个项目，最合适的不是“全站登录墙”，而是：
+
+- **公开内容可访问、可索引**
+- **交互能力要求登录**
+- **敏感字段按授权裁剪**
+
+也就是：
+
+1. 首页、资源详情页、公开列表页、文档页保持可访问
+2. `middleware.ts` 继续只保护真正的私域页面
+3. 购买、下载、评论、收藏、私信、用户中心等行为继续要求登录
+4. 资源详情接口只返回当前用户有权看到的字段
+
+这和当前交易系统设计也是一致的：
+
+- 资源页可以被 Google 收录
+- 但未购买用户拿不到真实 `content` / `code` / `password`
+- 购买与下载动作仍然走登录校验
+
+### 五、落到当前仓库的具体做法
+
+#### 1. middleware 层
+
+建议继续维持“只拦私域页面”的策略，不要把公开内容页一起拦掉。
+
+当前应继续保持为主：
+
+- `/admin`
+- `/user`
+- `/comment`
+- `/edit`
+
+后续如果新增交易私域页，也只增量补私域路径，例如：
+
+- `/settings`
+- `/wallet`
+- `/order`
+
+不建议把：
+
+- `/`
+- `/resource`
+- `/:id`
+- `/doc`
+- `/search`
+
+这类公开内容入口纳入统一登录跳转。
+
+#### 2. SEO 与 metadata 层
+
+`app/metadata.ts` 继续作为全站公开内容默认可索引的基础配置。
+
+真正不希望收录的页面，建议按页面类型单独处理：
+
+- 私域页面直接不进 sitemap
+- 私域页面继续由 `robots.txt` 禁止抓取
+- 必要时在页面级 metadata 上补 `robots: { index: false, follow: false }`
+
+#### 3. robots 与 sitemap 层
+
+当前 `public/robots.txt` 与 `scripts/generateKunSitemap.ts` 的方向是对的，后续建议继续保持：
+
+- 用户中心、后台、消息页、编辑页不收录
+- 公开资源页、公开列表页、文档页继续收录
+
+如果后面想把 robots 配置更程序化，可以再考虑迁移到 Next.js 的 `app/robots.ts`，但这不是第一阶段必做项。
+
+#### 4. 资源详情接口层
+
+真正的关键不是“让不让用户看到页面壳子”，而是“让不让用户拿到真实资源信息”。
+
+因此核心改造点仍然是：
+
+- `app/api/patch/resource/get.ts`
+
+需要继续按登录态、购买态、有效期做字段裁剪：
+
+- 免费资源：返回真实下载信息
+- 作者本人 / 管理员：返回真实下载信息
+- 已购且未过期：返回真实下载信息
+- 未购买 / 已过期：隐藏真实下载信息
+
+这样即使公开详情页被搜索引擎索引，也不会把敏感下载字段暴露给未授权用户。
+
+#### 5. 交易动作层
+
+下面这些仍然必须登录：
+
+- `POST /api/patch/resource/purchase`
+- `PUT /api/patch/resource/download`
+- 用户已购资源页 `/user/[id]/purchase`
+- 钱包、账本、订单页
+
+这样可以同时满足：
+
+- SEO 继续保留
+- 交易闭环继续安全
+
+### 六、如果你坚持“普通用户必须登录后才可看正文”
+
+那就不要再把目标定义成“Google 抓完整正文”。
+
+更稳妥的做法应该改成：
+
+- 给搜索引擎提供公开摘要页 / SSR 摘要内容
+- 真正完整内容仅登录后可见
+
+这类做法更像：
+
+- 公开 SEO 落地页
+- 登录后完整版页面
+
+但这已经不是“全站直接登录跳转”了，而是“双层内容模型”，实现成本会更高。
+
+### 七、对当前项目的最终建议
+
+结合你现在的仓库结构与后续付费资源目标，推荐明确采用下面这条原则：
+
+- **不做全站登录墙**
+- **做公开内容页 + 登录后交互 + 授权字段裁剪**
+
+也就是：
+
+- 让 Google 继续抓首页、资源详情、公开列表、文档
+- 让普通未登录用户可以看页面基础内容
+- 但不让未登录或未授权用户拿到真实下载资源
+- 用户中心、交易页、消息页继续必须登录
+
+## 分阶段实施计划
+
+### 阶段一：数据层打底
+
+- 新增货币定义、余额、账本、售卖、购买五类模型。
+- 建立唯一约束、查询索引与基础常量。
+- 业务上只启用一种主交易货币。
+
+### 阶段二：资源付费闭环
+
+- 发布资源时支持配置售卖信息。
+- 资源接口按授权与有效期隐藏真实下载内容。
+- 新增购买接口并打通扣币、入账、授权。
+- 下载接口支持首次下载触发授权倒计时。
+- 前端显示价格、购买按钮、已购状态、失效时间与失效提示。
+
+### 阶段三：货币发放入口
+
+- 增加管理员发币能力。
+- 增加活动奖励或独立签到奖励。
+- 提供余额与账本查询页面或接口。
+
+### 阶段四：安全与运营增强
+
+- 增加延期授权、重新购买、续期策略。
+- 增加停售、退款、封禁后的策略处理。
+- 视需求再评估更强的下载链路保护。
+
+## 第一阶段非目标
+
+- 不做 `moemoepoint` 与新货币兑换。
+- 不做多币种汇率。
+- 不做用户间转账。
+- 不做一个资源配置多种支付币种。
+- 不做全站所有功能统一切换到新货币体系。
+- 不在第一阶段处理资源被购买后站外二次传播的问题。
+
+## 风险与约束
+
+- 授权有效期一旦按“首次下载后开始计时”实现，就必须在真实下载动作发生时写入首次下载时间，不能只在前端点击按钮时启动。
+- 若同一用户在多个设备上同时触发首次下载，需要依赖数据库事务确保只会成功初始化一次授权开始时间。
+- 多货币与时效授权同时存在后，后台配置、账本审计与客服处理复杂度会上升，因此第一期应尽量控制币种数量与授权模式数量。
+
+## 第一阶段验收标准
+
+- 免费资源行为不受影响。
+- 付费资源在未购买时不会泄露真实下载信息。
+- 买家购买成功后可立即下载，且不会重复扣款。
+- 对“首次下载后 3 天 / 30 天失效”的资源，首次真实下载后能正确生成失效时间，并在过期后自动失去站内授权。
+- 卖家收入、买家支出、购买记录、授权状态可在数据库中完整追溯。
+- 整体实现以新增模块为主，不破坏现有 `moemoepoint` 体系与原有资源流程。

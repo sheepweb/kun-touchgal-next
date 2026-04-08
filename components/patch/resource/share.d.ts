@@ -4,9 +4,22 @@ import type {
   UseFormSetValue,
   UseFormWatch
 } from 'react-hook-form'
-import type { PatchResourceLink } from '~/types/api/patch'
+import type {
+  PatchResourceAccessExpireMode,
+  PatchResourceLink
+} from '~/types/api/patch'
 
-interface Fields {
+export interface PatchResourceLinkInput {
+  id?: number
+  storage: PatchResourceLink['storage']
+  hash: PatchResourceLink['hash']
+  content: PatchResourceLink['content']
+  size: PatchResourceLink['size']
+  code: PatchResourceLink['code']
+  password: PatchResourceLink['password']
+}
+
+export interface PatchResourceFormData {
   type: string[]
   name: string
   section: string
@@ -14,16 +27,15 @@ interface Fields {
   note: string
   language: string[]
   platform: string[]
-  links: Array<{
-    id?: number
-    storage: PatchResourceLink['storage']
-    hash: PatchResourceLink['hash']
-    content: PatchResourceLink['content']
-    size: PatchResourceLink['size']
-    code: PatchResourceLink['code']
-    password: PatchResourceLink['password']
-  }>
+  links: PatchResourceLinkInput[]
+  enableSale: boolean
+  saleCurrencyCode: string
+  salePrice: number
+  saleAccessExpireMode: PatchResourceAccessExpireMode
+  saleAccessDurationDays: number | null
 }
+
+export type PatchResourceFormOutput = PatchResourceFormData
 
 export interface FileStatus {
   file: File
@@ -33,7 +45,7 @@ export interface FileStatus {
   filetype?: string
 }
 
-export type ErrorType = FieldErrors<Fields>
-export type ControlType = Control<Fields, any>
-export type SetValueType = UseFormSetValue<Fields>
-export type WatchType = UseFormWatch<Fields>
+export type ErrorType = FieldErrors<PatchResourceFormData>
+export type ControlType = Control<PatchResourceFormData, any>
+export type SetValueType = UseFormSetValue<PatchResourceFormData>
+export type WatchType = UseFormWatch<PatchResourceFormData>

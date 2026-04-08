@@ -62,6 +62,17 @@ export const getUserInfoSchema = z.object({
   limit: z.coerce.number().min(1).max(20)
 })
 
+export const userPurchaseAccessStatusSchema = z.enum([
+  'all',
+  'owned',
+  'expired',
+  'not_started'
+])
+
+export const getUserPurchaseInfoSchema = getUserInfoSchema.extend({
+  accessStatus: userPurchaseAccessStatusSchema.default('all')
+})
+
 export const searchUserSchema = z.object({
   query: z.string().min(1).max(20, { message: '非法的用户名长度' })
 })

@@ -1,6 +1,5 @@
 'use client'
 
-import { z } from 'zod'
 import { Button } from '@heroui/button'
 import {
   ModalBody,
@@ -9,18 +8,45 @@ import {
   ModalHeader
 } from '@heroui/react'
 import { useState } from 'react'
-import { useForm } from 'react-hook-form'
+import { useEffect } from 'react'
+import { useForm, type Resolver } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import toast from 'react-hot-toast'
 import { kunFetchPut } from '~/utils/kunFetch'
 import { patchResourceCreateSchema } from '~/validations/patch'
+import { DEFAULT_TRADE_CURRENCY_CODE } from '~/constants/currency'
 import { ResourceLinksInput } from '../publish/ResourceLinksInput'
 import { kunErrorHandler } from '~/utils/kunErrorHandler'
 import { ResourceDetailsForm } from '../publish/ResourceDetailsForm'
 import { ResourceSectionSelect } from '../publish/ResourceSectionSelect'
 import type { PatchResource } from '~/types/api/patch'
+import type { PatchResourceFormData, PatchResourceFormOutput } from '../share'
 
-type EditResourceFormData = z.infer<typeof patchResourceCreateSchema>
+type EditResourceFormData = PatchResourceFormData
+
+const getDefaultValues = (resource: PatchResource): EditResourceFormData => ({
+  patchId: resource.patchId,
+  section: resource.section,
+  name: resource.name,
+  note: resource.note,
+  type: resource.type,
+  language: resource.language,
+  platform: resource.platform,
+  links: resource.links.map((link) => ({
+    id: link.id,
+    storage: link.storage,
+    hash: link.hash,
+    content: link.content,
+    size: link.size,
+    code: link.code,
+    password: link.password
+  })),
+  enableSale: !!resource.sale,
+  saleCurrencyCode: resource.sale?.currencyCode ?? DEFAULT_TRADE_CURRENCY_CODE,
+  salePrice: resource.sale?.price ?? 0,
+  saleAccessExpireMode: resource.sale?.accessExpireMode ?? 'never',
+  saleAccessDurationDays: resource.sale?.accessDurationDays ?? null
+})
 
 interface EditResourceDialogProps {
   resource: PatchResource
@@ -44,10 +70,18 @@ export const EditResourceDialog = ({
     setValue,
     watch,
     formState: { errors }
-  } = useForm<EditResourceFormData>({
-    resolver: zodResolver(patchResourceCreateSchema),
-    defaultValues: resource
+  } = useForm<EditResourceFormData, any, PatchResourceFormOutput>({
+    resolver: zodResolver(patchResourceCreateSchema) as Resolver<
+      EditResourceFormData,
+      any,
+      PatchResourceFormOutput
+    >,
+    defaultValues: getDefaultValues(resource)
   })
+
+  useEffect(() => {
+    reset(getDefaultValues(resource))
+  }, [resource, reset])
 
   const handleUpdateResource = async () => {
     setEditing(true)

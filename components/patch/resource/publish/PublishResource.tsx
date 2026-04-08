@@ -2,7 +2,7 @@
 
 import { z } from 'zod'
 import { useRef, useState, type ReactNode } from 'react'
-import { useForm } from 'react-hook-form'
+import { useForm, type Resolver } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { Button } from '@heroui/button'
 import { Link } from '@heroui/link'
@@ -16,6 +16,7 @@ import {
 import toast from 'react-hot-toast'
 import { kunFetchPost } from '~/utils/kunFetch'
 import { patchResourceCreateSchema } from '~/validations/patch'
+import { DEFAULT_TRADE_CURRENCY_CODE } from '~/constants/currency'
 import { ResourceLinksInput } from './ResourceLinksInput'
 import { ResourceDetailsForm } from './ResourceDetailsForm'
 import { ResourceSectionSelect } from './ResourceSectionSelect'
@@ -27,8 +28,9 @@ import {
 import { kunErrorHandler } from '~/utils/kunErrorHandler'
 import { useUserStore } from '~/store/userStore'
 import type { PatchResource } from '~/types/api/patch'
+import type { PatchResourceFormData, PatchResourceFormOutput } from '../share'
 
-export type ResourceFormData = z.infer<typeof patchResourceCreateSchema>
+export type ResourceFormData = PatchResourceFormData
 
 interface CreateResourceProps {
   patchId: number
@@ -77,8 +79,12 @@ export const PublishResource = ({
     setValue,
     formState: { errors },
     watch
-  } = useForm<ResourceFormData>({
-    resolver: zodResolver(patchResourceCreateSchema),
+  } = useForm<ResourceFormData, any, PatchResourceFormOutput>({
+    resolver: zodResolver(patchResourceCreateSchema) as Resolver<
+      ResourceFormData,
+      any,
+      PatchResourceFormOutput
+    >,
     defaultValues: {
       patchId,
       name: '',
@@ -87,7 +93,12 @@ export const PublishResource = ({
       language: [],
       platform: [],
       note: '',
-      links: [createDefaultLink(user.role > 2 ? 'galgame' : 'patch')]
+      links: [createDefaultLink(user.role > 2 ? 'galgame' : 'patch')],
+      enableSale: false,
+      saleCurrencyCode: DEFAULT_TRADE_CURRENCY_CODE,
+      salePrice: 0,
+      saleAccessExpireMode: 'never',
+      saleAccessDurationDays: null
     }
   })
 
@@ -101,7 +112,7 @@ export const PublishResource = ({
     try {
       const res = await kunFetchPost<KunResponse<PatchResource>>(
         '/patch/resource',
-        watch()
+        watch() as PatchResourceFormOutput & Record<string, unknown>
       )
       kunErrorHandler(res, (value) => {
         reset()

@@ -12,6 +12,7 @@ import {
   MessageSquare,
   Puzzle,
   Settings,
+  Wallet,
   TriangleAlert,
   Users
 } from 'lucide-react'
@@ -36,6 +37,11 @@ const menuItems = [
     name: '下载资源管理',
     href: '/admin/resource',
     icon: Puzzle
+  },
+  {
+    name: '交易管理',
+    href: '/admin/trade',
+    icon: Wallet
   },
   {
     name: '首次资源发布申请',
